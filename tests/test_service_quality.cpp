@@ -8,6 +8,8 @@
 #include <future>
 #include <vector>
 
+typedef std::vector<std::vector<float>> FrameBuffer;
+
 class ServiceQuality : public ::testing::Test {
 protected:
     void SetUp() override {
@@ -85,35 +87,39 @@ protected:
         }
     }
 
-    void Send(size_t frame_size, size_t num_frames) {
-        std::vector<float> frame_buf(frame_size);
-
-        std::fill(frame_buf.begin(), frame_buf.end(), 0.5);
+    void Send(std::vector<float> send_frame, size_t num_frames) {
+        // init buffer
+        send_buffer.resize(num_frames);        
 
         for (size_t n = 0; n < num_frames; n++) {
             roc_frame frame = {};
-            frame.samples = &frame_buf[0];
-            frame.samples_size = frame_buf.size() * sizeof(float);
+            frame.samples = &send_frame[0];
+            frame.samples_size = send_frame.size() * sizeof(float);
 
-            EXPECT_EQ(roc_sender_write(sender_, &frame), 0);
+            ASSERT_EQ(roc_sender_write(sender_, &frame), 0);
+            // save sent frame to buffer    
+            send_buffer[n] = send_frame;
         }
     }
 
     void Receive(size_t frame_size, size_t num_frames) {
-        std::vector<float> frame_buf(frame_size);
-
+        std::vector<float> recv_frame(frame_size);
         bool received_something = false;
+        // init buffer
+        recv_buffer.resize(num_frames);
 
         for (size_t n = 0; n < num_frames; n++) {
-            std::fill(frame_buf.begin(), frame_buf.end(), 0);
+            std::fill(recv_frame.begin(), recv_frame.end(), 0);
 
             roc_frame frame = {};
-            frame.samples = &frame_buf[0];
-            frame.samples_size = frame_buf.size() * sizeof(float);
+            frame.samples = &recv_frame[0];
+            frame.samples_size = recv_frame.size() * sizeof(float);
 
-            EXPECT_EQ(roc_receiver_read(receiver_, &frame), 0);
+            ASSERT_EQ(roc_receiver_read(receiver_, &frame), 0);
+            // save received frame to buffer
+            recv_buffer[n] = recv_frame;
 
-            if (!std::all_of(frame_buf.begin(), frame_buf.end(),
+            if (!std::all_of(recv_frame.begin(), recv_frame.end(),
                              [](float f) { return f == 0; })) {
                 received_something = true;
             }
@@ -129,12 +135,36 @@ protected:
     roc_context* context_ {};
     roc_receiver* receiver_ {};
     roc_sender* sender_ {};
+    FrameBuffer send_buffer {1}; // buffer for sent frames
+    FrameBuffer recv_buffer {1}; // buffer for received frames
 };
 
 TEST_F(ServiceQuality, NoLoss) {
-    auto sending = std::async(std::launch::async, [=]() { Send(256, 500); });
+    size_t frame_size = 256;
+    size_t num_frames = 500;
+    std::vector<float> send_frames(frame_size);
+    std::fill(send_frames.begin(), send_frames.end(), 0.5);
 
-    Receive(256, 500);
-
+    auto sending = std::async(std::launch::async, [=]() { Send(send_frames, num_frames); });
+    auto receiving = std::async(std::launch::async, [=](){ Receive(frame_size, num_frames); });
+    // wait until all threads finish execution
     sending.wait();
+    receiving.wait();
+    
+    // Check recv_buffer on broken frames
+    size_t k = 0;
+    for(size_t i=0; i<num_frames; i++) {
+        for(size_t j=0; j<frame_size; j++) {
+            if (recv_buffer[i][j] == 0) {
+                k++;
+            }
+        }
+        // If we've not got any correct float from frame
+        if (k == frame_size) {
+            std::cout << "All-zero Frame " << i << std::endl; 
+            k = 0;
+        } else if (k != frame_size && k != 0) {
+            std::cout << "Frame " << i << "contains " << k << " zeros." << std::endl;
+        }   
+    }
 }
